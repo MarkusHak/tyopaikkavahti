@@ -161,16 +161,4 @@ def run_watchdog():
 
 
 if __name__ == "__main__":
-    print("🤖 Työpaikkavahti käynnistetty taustalle...")
-    
-    # Ajetaan kerran heti käynnistyksessä
     run_watchdog()
-    
-    # Ajastukset 2 krt päivässä
-    schedule.every().day.at("08:00").do(run_watchdog)
-    schedule.every().day.at("16:00").do(run_watchdog)
-    
-    print("Odotetaan ajastettuja aikoja (klo 08:00 ja 16:00)...")
-    while True:
-        schedule.run_pending()
-        time.sleep(30)

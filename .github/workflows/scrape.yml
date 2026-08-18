@@ -1,0 +1,33 @@
+name: Run Job Watchdog
+
+on:
+  schedule:
+    # UTC-aika: 05:00 ja 13:00 (Suomessa kesäaikana klo 08:00 ja 16:00)
+    - cron: '0 5,13 * * *'
+  # Mahdollistaa myös manuaalisen käynnistyksen GitHubin nettisivuilta
+  workflow_dispatch:
+
+jobs:
+  scrape-and-notify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Scraper
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python scraper.py
