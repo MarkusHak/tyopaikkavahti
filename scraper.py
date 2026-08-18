@@ -1,9 +1,8 @@
 import os
+import time
 import requests
-from bs4 import BeautifulSoup
 from supabase import create_client, Client
 from dotenv import load_dotenv
-import time
 
 load_dotenv('.env.local', override=True)
 
@@ -14,10 +13,10 @@ ENV_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 }
 
-# Kaikki seurattavat kehittäjä- ja junioriroolit
+# Kaikki seurattavat roolit (Duunitori kattaa myös IT- ja TE-paikat)
 SEARCH_TERMS = [
     "ohjelmistokehittäjä",
     "software developer",
@@ -33,7 +32,7 @@ SEARCH_TERMS = [
 
 
 def fetch_duunitori_jobs(query: str):
-    """Hakee työpaikat Duunitorin JSON-rajapinnasta annetulla hakusanalla."""
+    """Hakee työpaikat Duunitorin JSON-rajapinnasta (sisältää myös ITduunit ja TE-palvelut)."""
     url = "https://duunitori.fi/api/v1/jobentries"
     params = {"search": query, "format": "json"}
     
@@ -49,7 +48,7 @@ def fetch_duunitori_jobs(query: str):
                 company = company_obj.get("name") if isinstance(company_obj, dict) else "Ei ilmoitettu"
                 
                 results.append({
-                    "source": f"Duunitori ({query})",
+                    "source": f"Duunitori / {query}",
                     "title": item.get("heading", "Työpaikkailmoitus"),
                     "company": company,
                     "location": item.get("municipality_name") or "Suomi / Etätyö",
@@ -60,42 +59,6 @@ def fetch_duunitori_jobs(query: str):
     return results
 
 
-def fetch_itduunit_jobs():
-    """Hakee uusimmat IT-alan työpaikat ITduunit.fi-sivustolta."""
-    url = "https://itduunit.fi/tyopaikat"
-    results = []
-    
-    try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, "html.parser")
-            job_cards = soup.select(".job-box, .grid-job, article.job, div.job-box__content")
-            
-            for card in job_cards[:15]:
-                title_elem = card.select_one("h3, h2, .job-box__title")
-                link_elem = card.select_one("a") if card.name != 'a' else card
-                company_elem = card.select_one(".job-box__company, .company")
-                
-                if title_elem and link_elem:
-                    href = link_elem.get("href", "")
-                    if not href:
-                        continue
-                    full_link = href if href.startswith("http") else f"https://duunitori.fi{href}"
-                    title = title_elem.get_text(strip=True)
-                    company = company_elem.get_text(strip=True) if company_elem else "IT-yritys"
-                    
-                    results.append({
-                        "source": "itduunit.fi",
-                        "title": title,
-                        "company": company,
-                        "location": "IT / Etätyö",
-                        "link": full_link
-                    })
-    except Exception as e:
-        print(f"itduunit.fi -virhe: {e}")
-    return results
-
-
 def send_discord_alert(webhook_url: str, job: dict):
     payload = {
         "username": "Työpaikkavahti",
@@ -103,7 +66,7 @@ def send_discord_alert(webhook_url: str, job: dict):
             {
                 "title": f"🎯 Uusi työpaikka: {job['title']}",
                 "description": f"**Työnantaja:** {job['company']}\n**Sijainti:** {job['location']}",
-                "color": 3066993 if "itduunit.fi" in job['source'] else 3447003,
+                "color": 3447003,
                 "fields": [
                     {
                         "name": "Linkki ilmoitukseen",
@@ -120,24 +83,17 @@ def send_discord_alert(webhook_url: str, job: dict):
     
     while True:
         res = requests.post(webhook_url, json=payload)
-        
         if res.status_code in [200, 204]:
-            print(f"-> Viesti lähetetty Discordiin ({job['source']}): {job['title']}")
-            time.sleep(1)  # Pieni 1 sekunnin tauko viestien välille rate limitin välttämiseksi
+            print(f"-> Lähetetty Discordiin: {job['title']}")
+            time.sleep(1)
             break
         elif res.status_code == 429:
             retry_after = res.json().get("retry_after", 1.5)
-            print(f"⏳ Discord rate limit: odotetaan {retry_after}s...")
+            print(f"⏳ Odotetaan {retry_after}s rate limitin takia...")
             time.sleep(retry_after + 0.5)
         else:
             print(f"Discord-virhe ({res.status_code}): {res.text}")
             break
-    
-    res = requests.post(webhook_url, json=payload)
-    if res.status_code in [200, 204]:
-        print(f"-> Viesti lähetetty Discordiin ({job['source']}): {job['title']}")
-    else:
-        print(f"Discord-virhe ({res.status_code}): {res.text}")
 
 
 def run_watchdog():
@@ -155,10 +111,6 @@ def run_watchdog():
         print("Huom: Discord Webhook URL puuttuu tai ei ole kelvollinen!")
         return
 
-    print("🔍 Etsitään työpaikkoja Duunitorista hakusanoilla:")
-    print(", ".join(SEARCH_TERMS))
-    
-    # 1. Haetaan Duunitorista kaikilla hakusanoilla
     all_jobs = []
     seen_in_current_run = set()
 
@@ -169,16 +121,8 @@ def run_watchdog():
                 seen_in_current_run.add(job["link"])
                 all_jobs.append(job)
 
-    # 2. Haetaan ITduunit.fi -sivustolta
-    it_jobs = fetch_itduunit_jobs()
-    for job in it_jobs:
-        if job["link"] not in seen_in_current_run:
-            seen_in_current_run.add(job["link"])
-            all_jobs.append(job)
-            
-    print(f"Löydettiin yhteensä {len(all_jobs)} uniikkia ilmoitusta. Tarkistetaan tietokannasta...")
+    print(f"Löydettiin yhteensä {len(all_jobs)} uniikkia ilmoitusta. Tarkistetaan uudet kannasta...")
 
-    # 3. Tarkistetaan kannasta ja lähetetään vain uudet
     new_count = 0
     for job in all_jobs:
         job_link = job["link"]
