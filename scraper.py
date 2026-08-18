@@ -16,7 +16,7 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 }
 
-# Kaikki seurattavat roolit (Duunitori kattaa myös IT- ja TE-paikat)
+# Seurattavat hakusanat kehittäjä- ja juniorirooleille
 SEARCH_TERMS = [
     "ohjelmistokehittäjä",
     "software developer",
@@ -30,9 +30,44 @@ SEARCH_TERMS = [
     "sovelluskehittäjä"
 ]
 
+# Pohjois-Savon kunnat ja avainsanat
+POHJOIS_SAVO_MUNICIPALITIES = {
+    "kuopio", "siilinjärvi", "iisalmi", "varkaus", "lapinlahti", 
+    "leppävirta", "suonenjoki", "kiuruvesi", "kaavi", "keitele", 
+    "pielavesi", "rautalampi", "sonkajärvi", "tervo", "tuusniemi", 
+    "vesanto", "vieremä", "pohjois-savo"
+}
+
+# Etätyön tunnistussanat
+REMOTE_KEYWORDS = [
+    "etätyö", "etä", "remote", "hybridi", "hybrid", 
+    "koko suomi", "paikkariippumaton", "remote work", "work from anywhere"
+]
+
+
+def is_job_matching_location_criteria(job_data: dict) -> bool:
+    """Tarkistaa, onko työpaikka Pohjois-Savossa tai tarjoaako se etätyömahdollisuuden."""
+    location = str(job_data.get("location", "")).lower()
+    title = str(job_data.get("title", "")).lower()
+    description = str(job_data.get("description", "")).lower()
+    
+    combined_text = f"{location} {title} {description}"
+
+    # 1. Ehto: Sijainti on Pohjois-Savossa
+    for place in POHJOIS_SAVO_MUNICIPALITIES:
+        if place in location or place in title:
+            return True
+
+    # 2. Ehto: Etätyömahdollisuus muualta Suomesta
+    for remote_term in REMOTE_KEYWORDS:
+        if remote_term in combined_text:
+            return True
+
+    return False
+
 
 def fetch_duunitori_jobs(query: str):
-    """Hakee työpaikat Duunitorin JSON-rajapinnasta (sisältää myös ITduunit ja TE-palvelut)."""
+    """Hakee työpaikat Duunitorin JSON-rajapinnasta."""
     url = "https://duunitori.fi/api/v1/jobentries"
     params = {"search": query, "format": "json"}
     
@@ -41,7 +76,7 @@ def fetch_duunitori_jobs(query: str):
         res = requests.get(url, params=params, headers=HEADERS, timeout=10)
         if res.status_code == 200:
             items = res.json().get("results", [])
-            for item in items[:15]:
+            for item in items[:20]:
                 slug = item.get("slug", "")
                 link = f"https://duunitori.fi/tyopaikat/tyo/{slug}" if slug else "https://duunitori.fi"
                 company_obj = item.get("company") or {}
@@ -51,7 +86,8 @@ def fetch_duunitori_jobs(query: str):
                     "source": f"Duunitori / {query}",
                     "title": item.get("heading", "Työpaikkailmoitus"),
                     "company": company,
-                    "location": item.get("municipality_name") or "Suomi / Etätyö",
+                    "location": item.get("municipality_name") or "Ei määritelty / Etätyö",
+                    "description": item.get("descr", "") or item.get("snippet", ""),
                     "link": link
                 })
     except Exception as e:
@@ -60,13 +96,17 @@ def fetch_duunitori_jobs(query: str):
 
 
 def send_discord_alert(webhook_url: str, job: dict):
+    # Merkitään otsikkoon selkeä tunniste sijainnille/etätyölle
+    is_local = any(place in job['location'].lower() for place in POHJOIS_SAVO_MUNICIPALITIES)
+    location_badge = "📍 POHJOIS-SAVO" if is_local else "🌐 ETÄTYÖ / HYBRIDI"
+
     payload = {
         "username": "Työpaikkavahti",
         "embeds": [
             {
-                "title": f"🎯 Uusi työpaikka: {job['title']}",
+                "title": f"🎯 [{location_badge}] {job['title']}",
                 "description": f"**Työnantaja:** {job['company']}\n**Sijainti:** {job['location']}",
-                "color": 3447003,
+                "color": 65280 if is_local else 3447003, # Vihreä paikallisille, sininen etätöille
                 "fields": [
                     {
                         "name": "Linkki ilmoitukseen",
@@ -84,7 +124,7 @@ def send_discord_alert(webhook_url: str, job: dict):
     while True:
         res = requests.post(webhook_url, json=payload)
         if res.status_code in [200, 204]:
-            print(f"-> Lähetetty Discordiin: {job['title']}")
+            print(f"-> Lähetetty Discordiin ({location_badge}): {job['title']}")
             time.sleep(1)
             break
         elif res.status_code == 429:
@@ -97,7 +137,7 @@ def send_discord_alert(webhook_url: str, job: dict):
 
 
 def run_watchdog():
-    print("\n--- Aloitetaan työpaikkahaku ---")
+    print("\n--- Aloitetaan työpaikkahaku (Pohjois-Savo & Etätyöt) ---")
     profiles_res = supabase.table("profiles").select("*").order("created_at", desc=True).limit(1).execute()
     
     db_webhook = None
@@ -119,9 +159,11 @@ def run_watchdog():
         for job in duuni_results:
             if job["link"] not in seen_in_current_run:
                 seen_in_current_run.add(job["link"])
-                all_jobs.append(job)
+                # Suodatetaan vain Pohjois-Savo ja etätyöt
+                if is_job_matching_location_criteria(job):
+                    all_jobs.append(job)
 
-    print(f"Löydettiin yhteensä {len(all_jobs)} uniikkia ilmoitusta. Tarkistetaan uudet kannasta...")
+    print(f"Löydettiin {len(all_jobs)} kriteerit täyttävää ilmoitusta. Tarkistetaan tietokanta...")
 
     new_count = 0
     for job in all_jobs:
