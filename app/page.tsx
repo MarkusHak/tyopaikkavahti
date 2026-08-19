@@ -4,7 +4,10 @@ import { useEffect, useState } from 'react';
 import { supabase } from './supabase';
 
 // 👉 VAIHDA OMA SALAINEN PIN-KOODISI TÄHÄN:
-const CORRECT_PIN = '1507';
+const CORRECT_PIN = '1234';
+
+// Kuinka monta työpaikkaa näytetään yhdellä sivulla
+const ITEMS_PER_PAGE = 10;
 
 interface Job {
   id: string;
@@ -38,6 +41,9 @@ export default function Home() {
   const [loadingJobs, setLoadingJobs] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'high_match' | 'local'>('all');
+
+  // Sivutuksen tila
+  const [currentPage, setCurrentPage] = useState(1);
 
   // Push-tilat
   const [pushSubscribed, setPushSubscribed] = useState(false);
@@ -154,6 +160,7 @@ export default function Home() {
         setErrorMessage(`Tietokantavirhe: ${error.message}`);
       } else if (data) {
         setJobs(data);
+        setCurrentPage(1); // Nollataan sivu haun yhteydessä
       }
     } catch (err: any) {
       setErrorMessage(`Yhteysvirhe: ${err.message || err}`);
@@ -220,6 +227,7 @@ export default function Home() {
     }
   };
 
+  // Suodatus
   const filteredJobs = jobs.filter((job) => {
     if (filter === 'high_match') return (job.match_score || 0) >= 50;
     if (filter === 'local') {
@@ -228,6 +236,16 @@ export default function Home() {
     }
     return true;
   });
+
+  // Sivutuksen laskenta
+  const totalPages = Math.ceil(filteredJobs.length / ITEMS_PER_PAGE) || 1;
+  const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
+  const paginatedJobs = filteredJobs.slice(startIndex, startIndex + ITEMS_PER_PAGE);
+
+  const handleFilterChange = (newFilter: 'all' | 'high_match' | 'local') => {
+    setFilter(newFilter);
+    setCurrentPage(1); // Siirrytään 1. sivulle, kun suodatin vaihtuu
+  };
 
   // Ladataan tilaa
   if (isAuthenticated === null) {
@@ -313,7 +331,7 @@ export default function Home() {
             {/* Suodattimet */}
             <div className="flex gap-2 mb-4 overflow-x-auto py-1">
               <button
-                onClick={() => setFilter('all')}
+                onClick={() => handleFilterChange('all')}
                 className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition ${
                   filter === 'all' ? 'bg-blue-600 text-white' : 'bg-slate-800 text-slate-300'
                 }`}
@@ -321,7 +339,7 @@ export default function Home() {
                 Kaikki ({jobs.length})
               </button>
               <button
-                onClick={() => setFilter('high_match')}
+                onClick={() => handleFilterChange('high_match')}
                 className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition ${
                   filter === 'high_match' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-300'
                 }`}
@@ -329,7 +347,7 @@ export default function Home() {
                 Parhaat osumat (≥50%)
               </button>
               <button
-                onClick={() => setFilter('local')}
+                onClick={() => handleFilterChange('local')}
                 className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition ${
                   filter === 'local' ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-300'
                 }`}
@@ -347,7 +365,7 @@ export default function Home() {
               </div>
             ) : (
               <div className="space-y-3">
-                {filteredJobs.map((job) => {
+                {paginatedJobs.map((job) => {
                   const score = job.match_score || 0;
                   const badgeColor =
                     score >= 70
@@ -404,6 +422,37 @@ export default function Home() {
                     </div>
                   );
                 })}
+
+                {/* SIVUTUSOHJAIMET (Pagination) */}
+                {totalPages > 1 && (
+                  <div className="flex items-center justify-between pt-4 pb-2 border-t border-slate-800/80">
+                    <button
+                      onClick={() => {
+                        setCurrentPage((prev) => Math.max(prev - 1, 1));
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                      }}
+                      disabled={currentPage === 1}
+                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800 rounded-lg text-xs font-medium text-slate-200 transition"
+                    >
+                      ← Edellinen
+                    </button>
+
+                    <span className="text-xs font-medium text-slate-400">
+                      Sivu <span className="text-white font-bold">{currentPage}</span> / {totalPages}
+                    </span>
+
+                    <button
+                      onClick={() => {
+                        setCurrentPage((prev) => Math.min(prev + 1, totalPages));
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                      }}
+                      disabled={currentPage === totalPages}
+                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800 rounded-lg text-xs font-medium text-slate-200 transition"
+                    >
+                      Seuraava →
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -412,7 +461,6 @@ export default function Home() {
         {/* NÄKYMÄ 2: ASETUKSET */}
         {activeTab === 'settings' && (
           <div className="space-y-4">
-            
             {/* PUSH-HÄLYTYKSET */}
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm">
               <h3 className="text-sm font-semibold text-white mb-1">📱 Puhelimen hälytykset</h3>
