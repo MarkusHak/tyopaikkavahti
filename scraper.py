@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import html
 import requests
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -50,7 +51,6 @@ def send_push_notification(title, body, url="/"):
             print("✅ Push-ilmoitus lähetetty onnistuneesti laitteeseen!")
         except WebPushException as ex:
             print(f"Push-lähetysvirhe: {ex}")
-            # Poistetaan vanhentunut tilaus tietokannasta
             if "410" in str(ex) or "404" in str(ex):
                 if sub_id:
                     supabase.from_("push_subscriptions").delete().eq(
@@ -62,67 +62,75 @@ def send_push_notification(title, body, url="/"):
 def fetch_and_process_jobs():
     print("\n--- Aloitetaan työpaikkahaku ja push-hälytykset ---")
 
-    # Duunitorin virallinen IT- ja ohjelmistoalan RSS-syöte
-    feed_url = (
-        "https://duunitori.fi/tyopaikat/ammattiala/it-ohjelmistot-tietoliikenne/rss.xml"
-    )
+    # Haetaan Duunitorin hakusivu
+    search_url = "https://duunitori.fi/tyopaikat?haku=ohjelmistokehitt%C3%A4j%C3%A4"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
+
     try:
-        resp = requests.get(feed_url, headers=headers, timeout=10)
+        resp = requests.get(search_url, headers=headers, timeout=15)
         resp.raise_for_status()
     except Exception as e:
-        print(f"Virhe haettaessa Duunitorin syötettä: {e}")
+        print(f"Virhe Duunitorin haussa: {e}")
         return
 
-    # Etsitään ilmoitukset regexillä
-    items = re.findall(r"<item>(.*?)</item>", resp.text, re.DOTALL)
+    # Etsitään työpaikkalinkit ja sisällöt HTML-rakenteesta
+    cards = re.findall(
+        r'<a\s+[^>]*href="(/tyopaikat/tyo/[^"]+)"[^>]*>(.*?)</a>', resp.text, re.DOTALL
+    )
 
     new_jobs = []
-    for item in items:
-        title_match = re.search(r"<title>(.*?)</title>", item)
-        link_match = re.search(r"<link>(.*?)</link>", item)
-        desc_match = re.search(r"<description>(.*?)</description>", item)
+    seen_urls = set()
 
-        raw_title = title_match.group(1) if title_match else "Työpaikkailmoitus"
-        job_url = link_match.group(1) if link_match else ""
-        desc = desc_match.group(1) if desc_match else ""
+    for path, content in cards:
+        full_url = f"https://duunitori.fi{path}"
+        if full_url in seen_urls:
+            continue
+        seen_urls.add(full_url)
 
-        # Siistitään CDATA
-        raw_title = raw_title.replace("<![CDATA[", "").replace("]]>", "").strip()
-        desc = desc.replace("<![CDATA[", "").replace("]]>", "").strip()
+        # Otsikko
+        title_match = re.search(
+            r'class="[^"]*job-box__title[^"]*"[^>]*>(.*?)</h3>', content, re.DOTALL
+        )
+        if not title_match:
+            title_match = re.search(r"<h3[^>]*>(.*?)</h3>", content, re.DOTALL)
 
-        # Erotetaan yritys ja titteli ("Titteli - Yritys" -> erikseen)
-        if " - " in raw_title:
-            parts = raw_title.split(" - ")
-            title = parts[0].strip()
-            company = parts[1].strip()
-        else:
-            title = raw_title
-            company = "Yritys ei tiedossa"
+        raw_title = title_match.group(1) if title_match else ""
+        title = html.unescape(re.sub(r"<[^>]+>", "", raw_title)).strip()
+        if not title:
+            continue
 
-        # Tunnistetaan sijainti tekstistä
-        location = "Suomi / Etä"
-        text_content = f"{title} {desc}".lower()
-        if (
-            "kuopio" in text_content
-            or "pohjois-savo" in text_content
-            or "siilinjärvi" in text_content
-        ):
-            location = "Pohjois-Savo / Kuopio"
-        elif "etä" in text_content or "remote" in text_content:
-            location = "Etätyö / Remote"
+        # Yritys
+        company_match = re.search(
+            r'class="[^"]*job-box__company[^"]*"[^>]*>(.*?)</span>', content, re.DOTALL
+        )
+        raw_company = company_match.group(1) if company_match else ""
+        company = (
+            html.unescape(re.sub(r"<[^>]+>", "", raw_company)).strip()
+            or "Yritys ei tiedossa"
+        )
+
+        # Sijainti
+        loc_match = re.search(
+            r'class="[^"]*job-box__location[^"]*"[^>]*>(.*?)</span>', content, re.DOTALL
+        )
+        raw_loc = loc_match.group(1) if loc_match else ""
+        location = (
+            html.unescape(re.sub(r"<[^>]+>", "", raw_loc)).strip() or "Suomi / Etä"
+        )
+
+        text_content = f"{title} {location}".lower()
 
         # Pisteytys
         score = 0
         matched_skills = []
         keywords = {
-            "React": ["react", "next.js", "nextjs"],
+            "React": ["react", "next"],
             "TypeScript": ["typescript", "ts"],
-            "Node.js": ["node", "nodejs", "express"],
+            "Node.js": ["node", "express"],
             "Python": ["python", "django", "fastapi"],
-            "Fullstack": ["fullstack", "full stack", "web"],
+            "Fullstack": ["fullstack", "full stack", "web", "kehittäjä", "developer"],
         }
 
         for skill, terms in keywords.items():
@@ -133,16 +141,16 @@ def fetch_and_process_jobs():
         if score > 100:
             score = 100
 
-        # Tarkistetaan onko työpaikka jo kannassa
+        # Tarkistus ja tallennus tietokantaan
         exists = (
-            supabase.from_("seen_jobs").select("id").eq("job_url", job_url).execute()
+            supabase.from_("seen_jobs").select("id").eq("job_url", full_url).execute()
         )
         if not exists.data:
             job_data = {
                 "title": title,
                 "company": company,
                 "location": location,
-                "job_url": job_url,
+                "job_url": full_url,
                 "match_score": score,
                 "matched_skills": matched_skills,
             }
@@ -152,7 +160,7 @@ def fetch_and_process_jobs():
 
     print(f"Haku valmis. Uusia ilmoituksia löydetty ja viety kantaan: {len(new_jobs)}")
 
-    # Lähetetään YKSI koottu ilmoitus
+    # Lähetetään push-ilmoitus
     if len(new_jobs) == 1:
         j = new_jobs[0]
         send_push_notification(
