@@ -1,14 +1,19 @@
+import json
 import os
 import time
-import requests
-from supabase import create_client, Client
 from dotenv import load_dotenv
+from pywebpush import WebPushException, webpush
+import requests
+from supabase import Client, create_client
 
 load_dotenv(".env.local", override=True)
 
 SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
 SUPABASE_KEY = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
-ENV_WEBHOOK = os.getenv("DISCORD_WEBHOOK_URL")
+VAPID_PRIVATE_KEY = os.getenv(
+    "VAPID_PRIVATE_KEY", "TT1k7SFnWz0pDjXNjoiVUlmRylRKfKX9znerC2HrUOU"
+)
+VAPID_CLAIMS = {"sub": "mailto:admin@example.com"}
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -63,7 +68,6 @@ REMOTE_KEYWORDS = [
     "work from anywhere",
 ]
 
-
 # Osaamisprofiilin pisteytys
 SKILL_WEIGHTS = {
     "react": 15,
@@ -101,7 +105,6 @@ def calculate_match_score(job_data: dict) -> tuple[int, list[str]]:
 
     for skill, points in SKILL_WEIGHTS.items():
         if skill in text_to_scan:
-            # Siistitään nimikkeet esitystä varten
             display_name = (
                 "Next.js"
                 if skill in ["next.js", "nextjs"]
@@ -123,12 +126,10 @@ def is_job_matching_location_criteria(job_data: dict) -> tuple[bool, bool]:
     description = str(job_data.get("description", "")).lower()
     combined_text = f"{location} {title} {description}"
 
-    # 1. Pohjois-Savo
     for place in POHJOIS_SAVO_MUNICIPALITIES:
         if place in location or place in title:
             return True, True
 
-    # 2. Etätyöt muualta Suomesta
     for remote_term in REMOTE_KEYWORDS:
         if remote_term in combined_text:
             return True, False
@@ -176,85 +177,43 @@ def fetch_duunitori_jobs(query: str):
     return results
 
 
-def send_discord_alert(
-    webhook_url: str, job: dict, score: int, matched_skills: list[str], is_local: bool
-):
-    location_badge = "📍 POHJOIS-SAVO" if is_local else "🌐 ETÄTYÖ / HYBRIDI"
+def send_push_notification(job: dict, score: int, is_local: bool):
+    """Lähettää push-ilmoituksen puhelimeen Web Push -rajapinnan kautta."""
+    res = supabase.table("push_subscriptions").select("id, subscription").execute()
+    subscriptions = res.data or []
 
-    if score >= 70:
-        color = 5763719  # Vihreä
-        stars = "⭐⭐⭐⭐⭐"
-    elif score >= 40:
-        color = 16776960  # Keltainen
-        stars = "⭐⭐⭐"
-    else:
-        color = 3447003  # Sininen
-        stars = "⭐"
+    if not subscriptions:
+        return
 
-    skills_str = (
-        ", ".join(matched_skills) if matched_skills else "Yleinen kehittäjätehtävä"
+    location_tag = "📍 Pohjois-Savo" if is_local else "🌐 Etätyö"
+    payload = json.dumps(
+        {
+            "title": f"🎯 Osuma {score}%: {job['title']}",
+            "body": f"🏢 {job['company']} • {location_tag}",
+            "url": job["link"],
+        }
     )
 
-    payload = {
-        "username": "Työpaikkavahti",
-        "embeds": [
-            {
-                "title": f"🎯 [{location_badge}] {job['title']}",
-                "description": f"**Työnantaja:** {job['company']}\n**Sijainti:** {job['location']}",
-                "color": color,
-                "fields": [
-                    {
-                        "name": f"Yhteensopivuus: {score}% {stars}",
-                        "value": f"**Osumat profiiliin:** {skills_str}",
-                        "inline": False,
-                    },
-                    {
-                        "name": "Linkki ilmoitukseen",
-                        "value": f"[Avaa työpaikkailmoitus tästä]({job['link']})",
-                        "inline": False,
-                    },
-                ],
-                "footer": {"text": f"Lähde: {job['source']}"},
-            }
-        ],
-    }
-
-    while True:
-        res = requests.post(webhook_url, json=payload)
-        if res.status_code in [200, 204]:
-            print(
-                f"-> Lähetetty Discordiin ({score}% | {location_badge}): {job['title']}"
+    for item in subscriptions:
+        try:
+            webpush(
+                subscription_info=item["subscription"],
+                data=payload,
+                vapid_private_key=VAPID_PRIVATE_KEY,
+                vapid_claims=VAPID_CLAIMS,
             )
-            time.sleep(1)
-            break
-        elif res.status_code == 429:
-            retry_after = res.json().get("retry_after", 1.5)
-            time.sleep(retry_after + 0.5)
-        else:
-            print(f"Discord-virhe ({res.status_code}): {res.text}")
-            break
+            print(f"-> Push-ilmoitus lähetetty puhelimeen: {job['title']}")
+        except WebPushException as ex:
+            print(f"Push-lähetysvirhe: {ex}")
+            # Jos tilaus on vanhentunut tai poistettu selaimesta, siivotaan se pois kannasta
+            if ex.response and ex.response.status_code in [404, 410]:
+                supabase.table("push_subscriptions").delete().eq(
+                    "id", item["id"]
+                ).execute()
 
 
 def run_watchdog():
-    print("\n--- Aloitetaan työpaikkahaku ja pisteytys ---")
-    profiles_res = (
-        supabase.table("profiles")
-        .select("*")
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-
-    db_webhook = None
-    if profiles_res.data:
-        profile = profiles_res.data[0]
-        db_webhook = profile.get("discord_webhook_url")
-
-    webhook_url = ENV_WEBHOOK or db_webhook
-
-    if not webhook_url or ("/api/webhooks/" not in webhook_url):
-        print("Huom: Discord Webhook URL puuttuu tai ei ole kelvollinen!")
-        return
+    print("\n--- Aloitetaan työpaikkahaku ja push-hälytykset ---")
 
     all_jobs = []
     seen_in_current_run = set()
@@ -268,8 +227,6 @@ def run_watchdog():
                 is_match, is_local = is_job_matching_location_criteria(job)
                 if is_match:
                     score, skills = calculate_match_score(job)
-
-                    # Suodatus: Pohjois-Savo aina mukaan, etätöissä vähintään 25 % osuma
                     if is_local or score >= 25:
                         all_jobs.append((job, score, skills, is_local))
 
@@ -282,22 +239,21 @@ def run_watchdog():
         job_link = job["link"]
 
         existing = (
-            supabase.table("seen_jobs")
-            .select("id")
-            .eq("job_url", job_link)
-            .eq("webhook_url", webhook_url)
-            .execute()
+            supabase.table("seen_jobs").select("id").eq("job_url", job_link).execute()
         )
+
         if existing.data:
             continue
 
-        send_discord_alert(webhook_url, job, score, skills, is_local)
+        # 1. Lähetetään Push-ilmoitus suoraan puhelimeen
+        send_push_notification(job, score, is_local)
         new_count += 1
 
+        # 2. Tallennetaan työpaikka Supabaseen (näkyy heti puhelimen etusivulla)
         supabase.table("seen_jobs").insert(
             {
                 "job_url": job_link,
-                "webhook_url": webhook_url,
+                "webhook_url": "push",
                 "title": job["title"],
                 "company": job["company"],
                 "location": job["location"],
@@ -306,7 +262,7 @@ def run_watchdog():
             }
         ).execute()
 
-    print(f"Haku valmis. Uusia ilmoituksia lähetetty Discordiin: {new_count}")
+    print(f"Haku valmis. Uusia ilmoituksia löydetty ja viety kantaan: {new_count}")
 
 
 if __name__ == "__main__":
