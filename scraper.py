@@ -138,7 +138,7 @@ def is_job_matching_location_criteria(job_data: dict) -> tuple[bool, bool]:
 
 
 def fetch_duunitori_jobs(query: str):
-    """Hakee työpaikat Duunitorin rajapinnasta."""
+    """Hakee työpaikat Duunitorin rajapinnasta ja poimii yrityksen nimen luotettavasti."""
     url = "https://duunitori.fi/api/v1/jobentries"
     params = {"search": query, "format": "json"}
     results = []
@@ -154,20 +154,48 @@ def fetch_duunitori_jobs(query: str):
                     if slug
                     else "https://duunitori.fi"
                 )
-                company_obj = item.get("company") or {}
-                company = (
-                    company_obj.get("name")
-                    if isinstance(company_obj, dict)
-                    else "Ei ilmoitettu"
+
+                # Nappaa yrityksen nimi kaikista Duunitorin mahdollisista kentistä
+                company_obj = item.get("company")
+                company_name = "Ei ilmoitettu"
+
+                if isinstance(company_obj, dict):
+                    company_name = (
+                        company_obj.get("name")
+                        or company_obj.get("title")
+                        or "Ei ilmoitettu"
+                    )
+                elif isinstance(company_obj, str) and company_obj.strip():
+                    company_name = company_obj
+                else:
+                    # Varavaihtoehdot suoraan juuresta
+                    company_name = (
+                        item.get("company_name")
+                        or item.get("employer_name")
+                        or item.get("organization_name")
+                        or "Ei ilmoitettu"
+                    )
+
+                # Poimitaan sijainti
+                location = (
+                    item.get("municipality_name")
+                    or item.get("location_name")
+                    or (
+                        item.get("location")
+                        if isinstance(item.get("location"), str)
+                        else None
+                    )
+                    or "Ei määritelty / Etätyö"
                 )
 
                 results.append(
                     {
                         "source": f"Duunitori / {query}",
-                        "title": item.get("heading", "Työpaikkailmoitus"),
-                        "company": company,
-                        "location": item.get("municipality_name")
-                        or "Ei määritelty / Etätyö",
+                        "title": item.get("heading")
+                        or item.get("title")
+                        or "Työpaikkailmoitus",
+                        "company": company_name,
+                        "location": location,
                         "description": item.get("descr", "") or item.get("snippet", ""),
                         "link": link,
                     }

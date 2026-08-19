@@ -1,11 +1,10 @@
-name: Run Job Watchdog
+name: Hourly Job Scraper
 
 on:
   schedule:
-    # UTC-aika: 05:00 ja 13:00 (Suomessa kesäaikana klo 08:00 ja 16:00)
-    - cron: '0 5,13 * * *'
-  # Mahdollistaa myös manuaalisen käynnistyksen GitHubin nettisivuilta
-  workflow_dispatch:
+    # Pyörii kerran tunnissa joka päivä
+    - cron: "0 * * * *"
+  workflow_dispatch: # Mahdollistaa myös manuaalisen ajon suoraan GitHubista
 
 jobs:
   scrape-and-notify:
@@ -18,16 +17,17 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: "3.11"
+          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests supabase python-dotenv pywebpush
 
-      - name: Run Scraper
+      - name: Run Job Scraper
         env:
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
         run: python scraper.py
