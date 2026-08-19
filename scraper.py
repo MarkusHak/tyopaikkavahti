@@ -45,33 +45,76 @@ REMOTE_KEYWORDS = [
 ]
 
 
-def is_job_matching_location_criteria(job_data: dict) -> bool:
-    """Tarkistaa, onko työpaikka Pohjois-Savossa tai tarjoaako se etätyömahdollisuuden."""
+# Osaamisprofiilin pisteytys
+SKILL_WEIGHTS = {
+    "react": 15,
+    "next.js": 15,
+    "nextjs": 15,
+    "typescript": 15,
+    "javascript": 12,
+    "python": 15,
+    "node.js": 12,
+    "nodejs": 12,
+    "tailwind": 8,
+    "docker": 8,
+    "supabase": 8,
+    "sql": 8,
+    "git": 6,
+    "rest": 6,
+    "api": 6,
+    "linux": 6,
+    "fullstack": 10,
+    "frontend": 10,
+    "backend": 10,
+    "junior": 10,
+    "trainee": 10
+}
+
+
+def calculate_match_score(job_data: dict) -> tuple[int, list[str]]:
+    """Laskee työpaikalle yhteensopivuuspisteet (0-100 %) ja palauttaa löydetyt taidot."""
+    text_to_scan = f"{job_data.get('title', '')} {job_data.get('description', '')}".lower()
+    
+    matched_skills = set()
+    total_score = 0
+
+    for skill, points in SKILL_WEIGHTS.items():
+        if skill in text_to_scan:
+            # Siistitään nimikkeet esitystä varten
+            display_name = "Next.js" if skill in ["next.js", "nextjs"] else ("Node.js" if skill in ["node.js", "nodejs"] else skill.capitalize())
+            matched_skills.add(display_name)
+            total_score += points
+
+    percentage = min(100, int((total_score / 50) * 100))
+    return percentage, sorted(list(matched_skills))
+
+
+def is_job_matching_location_criteria(job_data: dict) -> tuple[bool, bool]:
+    """Tarkistaa sijainnin. Palauttaa (hyväksytäänkö, onko_paikallinen)."""
     location = str(job_data.get("location", "")).lower()
     title = str(job_data.get("title", "")).lower()
     description = str(job_data.get("description", "")).lower()
-    
     combined_text = f"{location} {title} {description}"
 
-    # 1. Ehto: Sijainti on Pohjois-Savossa
+    # 1. Pohjois-Savo
     for place in POHJOIS_SAVO_MUNICIPALITIES:
         if place in location or place in title:
-            return True
+            return True, True
 
-    # 2. Ehto: Etätyömahdollisuus muualta Suomesta
+    # 2. Etätyöt muualta Suomesta
     for remote_term in REMOTE_KEYWORDS:
         if remote_term in combined_text:
-            return True
+            return True, False
 
-    return False
+    return False, False
 
 
 def fetch_duunitori_jobs(query: str):
-    """Hakee työpaikat Duunitorin JSON-rajapinnasta."""
+    """Hakee työpaikat Duunitorin rajapinnasta."""
     url = "https://duunitori.fi/api/v1/jobentries"
     params = {"search": query, "format": "json"}
-    
     results = []
+
     try:
         res = requests.get(url, params=params, headers=HEADERS, timeout=10)
         if res.status_code == 200:
@@ -95,10 +138,20 @@ def fetch_duunitori_jobs(query: str):
     return results
 
 
-def send_discord_alert(webhook_url: str, job: dict):
-    # Merkitään otsikkoon selkeä tunniste sijainnille/etätyölle
-    is_local = any(place in job['location'].lower() for place in POHJOIS_SAVO_MUNICIPALITIES)
+def send_discord_alert(webhook_url: str, job: dict, score: int, matched_skills: list[str], is_local: bool):
     location_badge = "📍 POHJOIS-SAVO" if is_local else "🌐 ETÄTYÖ / HYBRIDI"
+    
+    if score >= 70:
+        color = 5763719   # Vihreä
+        stars = "⭐⭐⭐⭐⭐"
+    elif score >= 40:
+        color = 16776960  # Keltainen
+        stars = "⭐⭐⭐"
+    else:
+        color = 3447003   # Sininen
+        stars = "⭐"
+
+    skills_str = ", ".join(matched_skills) if matched_skills else "Yleinen kehittäjätehtävä"
 
     payload = {
         "username": "Työpaikkavahti",
@@ -106,8 +159,13 @@ def send_discord_alert(webhook_url: str, job: dict):
             {
                 "title": f"🎯 [{location_badge}] {job['title']}",
                 "description": f"**Työnantaja:** {job['company']}\n**Sijainti:** {job['location']}",
-                "color": 65280 if is_local else 3447003, # Vihreä paikallisille, sininen etätöille
+                "color": color,
                 "fields": [
+                    {
+                        "name": f"Yhteensopivuus: {score}% {stars}",
+                        "value": f"**Osumat profiiliin:** {skills_str}",
+                        "inline": False
+                    },
                     {
                         "name": "Linkki ilmoitukseen",
                         "value": f"[Avaa työpaikkailmoitus tästä]({job['link']})",
@@ -124,12 +182,11 @@ def send_discord_alert(webhook_url: str, job: dict):
     while True:
         res = requests.post(webhook_url, json=payload)
         if res.status_code in [200, 204]:
-            print(f"-> Lähetetty Discordiin ({location_badge}): {job['title']}")
+            print(f"-> Lähetetty Discordiin ({score}% | {location_badge}): {job['title']}")
             time.sleep(1)
             break
         elif res.status_code == 429:
             retry_after = res.json().get("retry_after", 1.5)
-            print(f"⏳ Odotetaan {retry_after}s rate limitin takia...")
             time.sleep(retry_after + 0.5)
         else:
             print(f"Discord-virhe ({res.status_code}): {res.text}")
@@ -137,7 +194,7 @@ def send_discord_alert(webhook_url: str, job: dict):
 
 
 def run_watchdog():
-    print("\n--- Aloitetaan työpaikkahaku (Pohjois-Savo & Etätyöt) ---")
+    print("\n--- Aloitetaan työpaikkahaku ja pisteytys ---")
     profiles_res = supabase.table("profiles").select("*").order("created_at", desc=True).limit(1).execute()
     
     db_webhook = None
@@ -159,21 +216,26 @@ def run_watchdog():
         for job in duuni_results:
             if job["link"] not in seen_in_current_run:
                 seen_in_current_run.add(job["link"])
-                # Suodatetaan vain Pohjois-Savo ja etätyöt
-                if is_job_matching_location_criteria(job):
-                    all_jobs.append(job)
+                
+                is_match, is_local = is_job_matching_location_criteria(job)
+                if is_match:
+                    score, skills = calculate_match_score(job)
+                    
+                    # Suodatus: Pohjois-Savo aina mukaan, etätöissä vähintään 25 % osuma
+                    if is_local or score >= 25:
+                        all_jobs.append((job, score, skills, is_local))
 
-    print(f"Löydettiin {len(all_jobs)} kriteerit täyttävää ilmoitusta. Tarkistetaan tietokanta...")
+    print(f"Löydettiin {len(all_jobs)} kriteerit täyttävää paikkaa. Tarkistetaan uudet tietokannasta...")
 
     new_count = 0
-    for job in all_jobs:
+    for job, score, skills, is_local in all_jobs:
         job_link = job["link"]
         
         existing = supabase.table("seen_jobs").select("id").eq("job_url", job_link).eq("webhook_url", webhook_url).execute()
         if existing.data:
             continue
 
-        send_discord_alert(webhook_url, job)
+        send_discord_alert(webhook_url, job, score, skills, is_local)
         new_count += 1
         
         supabase.table("seen_jobs").insert({
