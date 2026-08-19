@@ -9,23 +9,20 @@ interface Job {
   company: string;
   location: string;
   job_url: string;
-  match_score: number;
-  matched_skills: string[];
+  match_score?: number;
+  matched_skills?: string[];
   created_at: string;
 }
 
 export default function Home() {
-  // Navigaatio: 'jobs' tai 'settings'
   const [activeTab, setActiveTab] = useState<'jobs' | 'settings'>('jobs');
-
-  // Työpaikkalistan tilat
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loadingJobs, setLoadingJobs] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'high_match' | 'local'>('all');
 
-  // Asetuslomakkeen tilat
   const [savingSettings, setSavingSettings] = useState(false);
-  const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
+  const [settingsMessage, setSettingsMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [formData, setFormData] = useState({
     discord_webhook_url: '',
     skills: 'React, TypeScript, Node.js, Python',
@@ -41,15 +38,23 @@ export default function Home() {
 
   async function fetchJobs() {
     setLoadingJobs(true);
-    const { data, error } = await supabase
-      .from('seen_jobs')
-      .select('*')
-      .order('created_at', { ascending: false });
+    setErrorMessage(null);
+    try {
+      const { data, error } = await supabase
+        .from('seen_jobs')
+        .select('*')
+        .order('created_at', { ascending: false });
 
-    if (!error && data) {
-      setJobs(data);
+      if (error) {
+        setErrorMessage(`Tietokantavirhe: ${error.message} (Koodi: ${error.code})`);
+      } else if (data) {
+        setJobs(data);
+      }
+    } catch (err: any) {
+      setErrorMessage(`Yhteysvirhe: ${err.message || err}`);
+    } finally {
+      setLoadingJobs(false);
     }
-    setLoadingJobs(false);
   }
 
   async function loadSavedProfile() {
@@ -88,7 +93,7 @@ export default function Home() {
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setSavingSettings(true);
-    setMessage(null);
+    setSettingsMessage(null);
 
     try {
       const { error } = await supabase.from('profiles').insert([
@@ -102,9 +107,9 @@ export default function Home() {
       ]);
 
       if (error) throw error;
-      setMessage({ text: 'Asetukset tallennettu onnistuneesti!', type: 'success' });
+      setSettingsMessage({ text: 'Asetukset tallennettu onnistuneesti!', type: 'success' });
     } catch (err: any) {
-      setMessage({ text: `Tallennus epäonnistui: ${err.message}`, type: 'error' });
+      setSettingsMessage({ text: `Tallennus epäonnistui: ${err.message}`, type: 'error' });
     } finally {
       setSavingSettings(false);
     }
@@ -147,6 +152,13 @@ export default function Home() {
         {/* NÄKYMÄ 1: TYÖPAIKAT */}
         {activeTab === 'jobs' && (
           <div>
+            {/* Virheilmoitus suoraan ruudulle */}
+            {errorMessage && (
+              <div className="p-3 mb-4 rounded-xl bg-rose-950/80 border border-rose-800 text-rose-200 text-xs">
+                ⚠️ {errorMessage}
+              </div>
+            )}
+
             {/* Suodattimet */}
             <div className="flex gap-2 mb-4 overflow-x-auto py-1">
               <button
@@ -202,11 +214,13 @@ export default function Home() {
                         <h2 className="font-semibold text-sm text-slate-100 line-clamp-2">
                           {job.title || 'Työpaikkailmoitus'}
                         </h2>
-                        <span
-                          className={`text-xs px-2 py-0.5 rounded-md font-bold border shrink-0 ${badgeColor}`}
-                        >
-                          {score}%
-                        </span>
+                        {job.match_score !== undefined && (
+                          <span
+                            className={`text-xs px-2 py-0.5 rounded-md font-bold border shrink-0 ${badgeColor}`}
+                          >
+                            {score}%
+                          </span>
+                        )}
                       </div>
 
                       <p className="text-xs text-slate-400 mb-2">
@@ -247,15 +261,15 @@ export default function Home() {
         {/* NÄKYMÄ 2: ASETUKSET */}
         {activeTab === 'settings' && (
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-sm">
-            {message && (
+            {settingsMessage && (
               <div
                 className={`p-3 mb-4 rounded-lg text-xs ${
-                  message.type === 'success'
+                  settingsMessage.type === 'success'
                     ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800'
                     : 'bg-rose-950/60 text-rose-300 border border-rose-800'
                 }`}
               >
-                {message.text}
+                {settingsMessage.text}
               </div>
             )}
 
@@ -342,7 +356,7 @@ export default function Home() {
         )}
       </main>
 
-      {/* Alavalikko (Navigaatiopalkki mobiilissa) */}
+      {/* Alavalikko */}
       <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-slate-900/95 backdrop-blur border-t border-slate-800 flex justify-around py-2.5 z-30">
         <button
           onClick={() => setActiveTab('jobs')}
