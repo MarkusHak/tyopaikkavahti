@@ -3,6 +3,9 @@
 import { useEffect, useState } from 'react';
 import { supabase } from './supabase';
 
+// 👉 VAIHDA OMA SALAINEN PIN-KOODISI TÄHÄN:
+const CORRECT_PIN = '1507';
+
 interface Job {
   id: string;
   title: string;
@@ -14,7 +17,6 @@ interface Job {
   created_at: string;
 }
 
-// Apufunktio VAPID-avaimen muuntamiseen selauskelpoiseen muotoon
 function urlBase64ToUint8Array(base64String: string) {
   const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
   const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
@@ -27,17 +29,21 @@ function urlBase64ToUint8Array(base64String: string) {
 }
 
 export default function Home() {
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState(false);
+
   const [activeTab, setActiveTab] = useState<'jobs' | 'settings'>('jobs');
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loadingJobs, setLoadingJobs] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'high_match' | 'local'>('all');
 
-  // Push-tilauksen tilat
+  // Push-tilat
   const [pushSubscribed, setPushSubscribed] = useState(false);
   const [pushLoading, setPushLoading] = useState(false);
 
-  // Asetuslomakkeen tilat
+  // Asetuslomake
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [formData, setFormData] = useState({
@@ -49,12 +55,40 @@ export default function Home() {
   });
 
   useEffect(() => {
+    const savedPin = localStorage.getItem('app_pin_auth');
+    if (savedPin === CORRECT_PIN) {
+      setIsAuthenticated(true);
+      initApp();
+    } else {
+      setIsAuthenticated(false);
+    }
+  }, []);
+
+  const initApp = () => {
     fetchJobs();
     loadSavedProfile();
     checkPushSubscription();
-  }, []);
+  };
 
-  // Tarkistetaan, onko laite jo tilannut ilmoitukset
+  const handlePinSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (pinInput === CORRECT_PIN) {
+      localStorage.setItem('app_pin_auth', CORRECT_PIN);
+      setIsAuthenticated(true);
+      setPinError(false);
+      initApp();
+    } else {
+      setPinError(true);
+      setPinInput('');
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('app_pin_auth');
+    setIsAuthenticated(false);
+    setPinInput('');
+  };
+
   async function checkPushSubscription() {
     if (typeof window !== 'undefined' && 'serviceWorker' in navigator && 'PushManager' in window) {
       try {
@@ -62,12 +96,11 @@ export default function Home() {
         const sub = await reg.pushManager.getSubscription();
         if (sub) setPushSubscribed(true);
       } catch (err) {
-        console.error('Push-tilan tarkistus epäonnistui:', err);
+        console.error('Push-tarkistus epäonnistui:', err);
       }
     }
   }
 
-  // Rekisteröidään laite push-ilmoituksille
   async function subscribeToPush() {
     setPushLoading(true);
     try {
@@ -81,11 +114,10 @@ export default function Home() {
 
       const permission = await Notification.requestPermission();
       if (permission !== 'granted') {
-        alert('Ilmoituslupa hylättiin selaimen asetuksissa.');
+        alert('Ilmoituslupa hylättiin selaimessa.');
         return;
       }
 
-      // Julkinen VAPID-avain
       const vapidPublicKey = 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDNTmxst9GytwdBQao5KoQ0mQxDRqUKVUph3dDR7w46Q';
       
       const sub = await reg.pushManager.subscribe({
@@ -119,7 +151,7 @@ export default function Home() {
         .order('created_at', { ascending: false });
 
       if (error) {
-        setErrorMessage(`Tietokantavirhe: ${error.message} (Koodi: ${error.code})`);
+        setErrorMessage(`Tietokantavirhe: ${error.message}`);
       } else if (data) {
         setJobs(data);
       }
@@ -149,7 +181,7 @@ export default function Home() {
         });
       }
     } catch (err) {
-      console.error('Profiilin nouto epäonnistui:', err);
+      console.error('Profiilin haku epäonnistui:', err);
     }
   }
 
@@ -180,7 +212,7 @@ export default function Home() {
       ]);
 
       if (error) throw error;
-      setSettingsMessage({ text: 'Asetukset tallennettu onnistuneesti!', type: 'success' });
+      setSettingsMessage({ text: 'Asetukset tallennettu!', type: 'success' });
     } catch (err: any) {
       setSettingsMessage({ text: `Tallennus epäonnistui: ${err.message}`, type: 'error' });
     } finally {
@@ -197,6 +229,54 @@ export default function Home() {
     return true;
   });
 
+  // Ladataan tilaa
+  if (isAuthenticated === null) {
+    return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-500 text-sm">Ladataan...</div>;
+  }
+
+  // --- PIN-LUKITUSRUUTU ---
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 max-w-md mx-auto">
+        <div className="w-full bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl text-center">
+          <div className="text-4xl mb-3">🔒</div>
+          <h2 className="text-lg font-bold text-white mb-1">Työpaikkavahti</h2>
+          <p className="text-xs text-slate-400 mb-6">Syötä PIN-koodi avataksesi sovelluksen</p>
+
+          <form onSubmit={handlePinSubmit} className="space-y-4">
+            <input
+              type="password"
+              inputMode="numeric"
+              maxLength={8}
+              value={pinInput}
+              onChange={(e) => {
+                setPinInput(e.target.value);
+                setPinError(false);
+              }}
+              placeholder="••••"
+              autoFocus
+              className={`w-36 mx-auto text-center text-2xl tracking-[0.3em] font-bold py-3 bg-slate-950 border rounded-xl focus:outline-none transition ${
+                pinError ? 'border-rose-500 text-rose-300' : 'border-slate-700 text-white focus:border-blue-500'
+              }`}
+            />
+
+            {pinError && (
+              <p className="text-xs text-rose-400 font-medium animate-pulse">Väärä PIN-koodi!</p>
+            )}
+
+            <button
+              type="submit"
+              className="w-full py-3 bg-blue-600 hover:bg-blue-500 active:scale-98 text-white font-semibold rounded-xl text-sm transition shadow-lg"
+            >
+              Avaa lukitus 🔓
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  // --- PÄÄSOVELLUS ---
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between max-w-md mx-auto relative pb-20">
       
@@ -222,7 +302,6 @@ export default function Home() {
 
       {/* Päänäkymä */}
       <main className="p-4 flex-1">
-        {/* NÄKYMÄ 1: TYÖPAIKAT */}
         {activeTab === 'jobs' && (
           <div>
             {errorMessage && (
@@ -330,15 +409,15 @@ export default function Home() {
           </div>
         )}
 
-        {/* NÄKYMÄ 2: ASETUKSET & HÄLYTYKSET */}
+        {/* NÄKYMÄ 2: ASETUKSET */}
         {activeTab === 'settings' && (
           <div className="space-y-4">
             
-            {/* PUSH-HÄLYTYKSEN KÄYTTÖÖNOTTOPAINIKE */}
+            {/* PUSH-HÄLYTYKSET */}
             <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm">
               <h3 className="text-sm font-semibold text-white mb-1">📱 Puhelimen hälytykset</h3>
               <p className="text-xs text-slate-400 mb-3">
-                Saat push-ilmoituksen heti, kun kriteerejäsi vastaava uusi työpaikka julkaistaan.
+                Saat ilmoituksen heti, kun kriteerejäsi vastaava uusi työpaikka löytyy.
               </p>
               
               <button
@@ -453,6 +532,16 @@ export default function Home() {
                   {savingSettings ? 'Tallennetaan...' : 'Tallenna kriteerit'}
                 </button>
               </form>
+            </div>
+
+            {/* LUKITUS / ULOSKIRJAUTUMINEN */}
+            <div className="pt-2 text-center">
+              <button
+                onClick={handleLogout}
+                className="text-xs text-rose-400 hover:text-rose-300 py-2 px-4 rounded-lg bg-rose-950/40 border border-rose-900/60"
+              >
+                🔒 Lukitse sovellus tällä laitteella
+              </button>
             </div>
           </div>
         )}
