@@ -14,6 +14,18 @@ interface Job {
   created_at: string;
 }
 
+// Apufunktio VAPID-avaimen muuntamiseen selauskelpoiseen muotoon
+function urlBase64ToUint8Array(base64String: string) {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/\-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<'jobs' | 'settings'>('jobs');
   const [jobs, setJobs] = useState<Job[]>([]);
@@ -21,6 +33,11 @@ export default function Home() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [filter, setFilter] = useState<'all' | 'high_match' | 'local'>('all');
 
+  // Push-tilauksen tilat
+  const [pushSubscribed, setPushSubscribed] = useState(false);
+  const [pushLoading, setPushLoading] = useState(false);
+
+  // Asetuslomakkeen tilat
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
   const [formData, setFormData] = useState({
@@ -34,7 +51,63 @@ export default function Home() {
   useEffect(() => {
     fetchJobs();
     loadSavedProfile();
+    checkPushSubscription();
   }, []);
+
+  // Tarkistetaan, onko laite jo tilannut ilmoitukset
+  async function checkPushSubscription() {
+    if (typeof window !== 'undefined' && 'serviceWorker' in navigator && 'PushManager' in window) {
+      try {
+        const reg = await navigator.serviceWorker.ready;
+        const sub = await reg.pushManager.getSubscription();
+        if (sub) setPushSubscribed(true);
+      } catch (err) {
+        console.error('Push-tilan tarkistus epäonnistui:', err);
+      }
+    }
+  }
+
+  // Rekisteröidään laite push-ilmoituksille
+  async function subscribeToPush() {
+    setPushLoading(true);
+    try {
+      if (!('serviceWorker' in navigator)) {
+        alert('Selaimesi ei tue Service Worker -palvelua.');
+        return;
+      }
+
+      const reg = await navigator.serviceWorker.register('/sw.js');
+      await navigator.serviceWorker.ready;
+
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        alert('Ilmoituslupa hylättiin selaimen asetuksissa.');
+        return;
+      }
+
+      // Julkinen VAPID-avain
+      const vapidPublicKey = 'BEl62iUYgUivxIkv69yViEuiBIa-Ib9-SkvMeAtA3LFgDNTmxst9GytwdBQao5KoQ0mQxDRqUKVUph3dDR7w46Q';
+      
+      const sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidPublicKey),
+      });
+
+      const { error } = await supabase.from('push_subscriptions').insert([
+        { subscription: sub.toJSON() },
+      ]);
+
+      if (error && !error.message.includes('duplicate')) throw error;
+
+      setPushSubscribed(true);
+      alert('🔔 Hälytykset aktivoitu puhelimeen!');
+    } catch (err: any) {
+      console.error(err);
+      alert(`Virhe ilmoitusten tilauksessa: ${err.message}`);
+    } finally {
+      setPushLoading(false);
+    }
+  }
 
   async function fetchJobs() {
     setLoadingJobs(true);
@@ -134,7 +207,7 @@ export default function Home() {
             {activeTab === 'jobs' ? '🎯 Työpaikkavahti' : '⚙️ Asetukset'}
           </h1>
           <p className="text-xs text-slate-400">
-            {activeTab === 'jobs' ? 'Löydetyt työpaikat ja osumat' : 'Muokkaa hakukriteereitä'}
+            {activeTab === 'jobs' ? 'Löydetyt työpaikat ja osumat' : 'Hälytykset ja hakukriteerit'}
           </p>
         </div>
         {activeTab === 'jobs' && (
@@ -152,7 +225,6 @@ export default function Home() {
         {/* NÄKYMÄ 1: TYÖPAIKAT */}
         {activeTab === 'jobs' && (
           <div>
-            {/* Virheilmoitus suoraan ruudulle */}
             {errorMessage && (
               <div className="p-3 mb-4 rounded-xl bg-rose-950/80 border border-rose-800 text-rose-200 text-xs">
                 ⚠️ {errorMessage}
@@ -258,100 +330,130 @@ export default function Home() {
           </div>
         )}
 
-        {/* NÄKYMÄ 2: ASETUKSET */}
+        {/* NÄKYMÄ 2: ASETUKSET & HÄLYTYKSET */}
         {activeTab === 'settings' && (
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-sm">
-            {settingsMessage && (
-              <div
-                className={`p-3 mb-4 rounded-lg text-xs ${
-                  settingsMessage.type === 'success'
-                    ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800'
-                    : 'bg-rose-950/60 text-rose-300 border border-rose-800'
+          <div className="space-y-4">
+            
+            {/* PUSH-HÄLYTYKSEN KÄYTTÖÖNOTTOPAINIKE */}
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-sm">
+              <h3 className="text-sm font-semibold text-white mb-1">📱 Puhelimen hälytykset</h3>
+              <p className="text-xs text-slate-400 mb-3">
+                Saat push-ilmoituksen heti, kun kriteerejäsi vastaava uusi työpaikka julkaistaan.
+              </p>
+              
+              <button
+                onClick={subscribeToPush}
+                disabled={pushLoading || pushSubscribed}
+                className={`w-full py-2.5 rounded-lg text-xs font-semibold transition active:scale-98 ${
+                  pushSubscribed
+                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-700 cursor-default'
+                    : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg'
                 }`}
               >
-                {settingsMessage.text}
-              </div>
-            )}
-
-            <form onSubmit={handleSaveSettings} className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Discord Webhook URL
-                </label>
-                <input
-                  type="text"
-                  name="discord_webhook_url"
-                  value={formData.discord_webhook_url}
-                  onChange={handleFormChange}
-                  placeholder="https://discord.com/api/webhooks/..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-slate-200"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Rooli / Hakusana
-                </label>
-                <input
-                  type="text"
-                  name="role_preference"
-                  value={formData.role_preference}
-                  onChange={handleFormChange}
-                  placeholder="esim. Fullstack Developer"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-slate-200"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Osaaminen / Avainsanat (pilkulla eroteltuna)
-                </label>
-                <textarea
-                  name="skills"
-                  value={formData.skills}
-                  onChange={handleFormChange}
-                  rows={2}
-                  placeholder="React, TypeScript, Node.js, Python"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-slate-200"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Sijainti
-                </label>
-                <input
-                  type="text"
-                  name="location_preference"
-                  value={formData.location_preference}
-                  onChange={handleFormChange}
-                  placeholder="Pohjois-Savo / Koko Suomi"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-slate-200"
-                />
-              </div>
-
-              <div className="flex items-center space-x-2 pt-1">
-                <input
-                  type="checkbox"
-                  id="remote_only_tab"
-                  name="remote_only"
-                  checked={formData.remote_only}
-                  onChange={handleFormChange}
-                  className="w-4 h-4 rounded bg-slate-950 border-slate-700 text-blue-600 focus:ring-0"
-                />
-                <label htmlFor="remote_only_tab" className="text-xs text-slate-300">
-                  Vain etätyö / etätyömahdollisuus
-                </label>
-              </div>
-
-              <button
-                type="submit"
-                disabled={savingSettings}
-                className="w-full mt-2 bg-blue-600 hover:bg-blue-500 text-white font-medium py-2 rounded-lg transition-colors text-xs disabled:opacity-50 active:scale-98"
-              >
-                {savingSettings ? 'Tallennetaan...' : 'Tallenna asetukset'}
+                {pushLoading
+                  ? 'Aktivoidaan...'
+                  : pushSubscribed
+                  ? '✅ Hälytykset aktivoitu tähän laitteeseen'
+                  : '🔔 Ota ilmoitukset käyttöön puhelimeen'}
               </button>
-            </form>
+            </div>
+
+            {/* HAKUKRITEERIT */}
+            <div className="bg-slate-900 border border-slate-800 rounded-xl p-5 shadow-sm">
+              <h3 className="text-sm font-semibold text-white mb-3">🎯 Hakukriteerit</h3>
+              
+              {settingsMessage && (
+                <div
+                  className={`p-3 mb-4 rounded-lg text-xs ${
+                    settingsMessage.type === 'success'
+                      ? 'bg-emerald-950/60 text-emerald-300 border border-emerald-800'
+                      : 'bg-rose-950/60 text-rose-300 border border-rose-800'
+                  }`}
+                >
+                  {settingsMessage.text}
+                </div>
+              )}
+
+              <form onSubmit={handleSaveSettings} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Discord Webhook URL
+                  </label>
+                  <input
+                    type="text"
+                    name="discord_webhook_url"
+                    value={formData.discord_webhook_url}
+                    onChange={handleFormChange}
+                    placeholder="https://discord.com/api/webhooks/..."
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-slate-200"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Rooli / Hakusana
+                  </label>
+                  <input
+                    type="text"
+                    name="role_preference"
+                    value={formData.role_preference}
+                    onChange={handleFormChange}
+                    placeholder="esim. Fullstack Developer"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-slate-200"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Osaaminen / Avainsanat (pilkulla eroteltuna)
+                  </label>
+                  <textarea
+                    name="skills"
+                    value={formData.skills}
+                    onChange={handleFormChange}
+                    rows={2}
+                    placeholder="React, TypeScript, Node.js, Python"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-slate-200"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-slate-300 mb-1">
+                    Sijainti
+                  </label>
+                  <input
+                    type="text"
+                    name="location_preference"
+                    value={formData.location_preference}
+                    onChange={handleFormChange}
+                    placeholder="Pohjois-Savo / Koko Suomi"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-blue-500 text-slate-200"
+                  />
+                </div>
+
+                <div className="flex items-center space-x-2 pt-1">
+                  <input
+                    type="checkbox"
+                    id="remote_only_tab"
+                    name="remote_only"
+                    checked={formData.remote_only}
+                    onChange={handleFormChange}
+                    className="w-4 h-4 rounded bg-slate-950 border-slate-700 text-blue-600 focus:ring-0"
+                  />
+                  <label htmlFor="remote_only_tab" className="text-xs text-slate-300">
+                    Vain etätyö / etätyömahdollisuus
+                  </label>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={savingSettings}
+                  className="w-full mt-2 bg-blue-600 hover:bg-blue-500 text-white font-medium py-2 rounded-lg transition-colors text-xs disabled:opacity-50 active:scale-98"
+                >
+                  {savingSettings ? 'Tallennetaan...' : 'Tallenna kriteerit'}
+                </button>
+              </form>
+            </div>
           </div>
         )}
       </main>
