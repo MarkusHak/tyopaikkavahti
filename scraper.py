@@ -1,297 +1,173 @@
-import json
 import os
-import time
-from dotenv import load_dotenv
-from pywebpush import WebPushException, webpush
+import re
+import json
 import requests
-from supabase import Client, create_client
+from supabase import create_client, Client
+from dotenv import load_dotenv
+from pywebpush import webpush, WebPushException
 
-load_dotenv(".env.local", override=True)
+load_dotenv(dotenv_path=".env.local")
 
 SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
 SUPABASE_KEY = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
-VAPID_PRIVATE_KEY = os.getenv(
-    "VAPID_PRIVATE_KEY", "TT1k7SFnWz0pDjXNjoiVUlmRylRKfKX9znerC2HrUOU"
-)
-VAPID_CLAIMS = {"sub": "mailto:admin@example.com"}
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY")
+VAPID_CLAIMS = {"sub": "mailto:tyopaikkavahti@example.com"}
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    print("Virhe: Supabase-avaimet puuttuvat ympäristömuuttujista.")
+    exit(1)
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-# Seurattavat hakusanat kehittäjä- ja juniorirooleille
-SEARCH_TERMS = [
-    "ohjelmistokehittäjä",
-    "software developer",
-    "fullstack",
-    "frontend developer",
-    "backend developer",
-    "software engineer",
-    "junior developer",
-    "junior ohjelmistokehittäjä",
-    "trainee developer",
-    "sovelluskehittäjä",
-]
-
-# Pohjois-Savon kunnat ja avainsanat
-POHJOIS_SAVO_MUNICIPALITIES = {
-    "kuopio",
-    "siilinjärvi",
-    "iisalmi",
-    "varkaus",
-    "lapinlahti",
-    "leppävirta",
-    "suonenjoki",
-    "kiuruvesi",
-    "kaavi",
-    "keitele",
-    "pielavesi",
-    "rautalampi",
-    "sonkajärvi",
-    "tervo",
-    "tuusniemi",
-    "vesanto",
-    "vieremä",
-    "pohjois-savo",
-}
-
-# Etätyön tunnistussanat
-REMOTE_KEYWORDS = [
-    "etätyö",
-    "etä",
-    "remote",
-    "hybridi",
-    "hybrid",
-    "koko suomi",
-    "paikkariippumaton",
-    "remote work",
-    "work from anywhere",
-]
-
-# Osaamisprofiilin pisteytys
-SKILL_WEIGHTS = {
-    "react": 15,
-    "next.js": 15,
-    "nextjs": 15,
-    "typescript": 15,
-    "javascript": 12,
-    "python": 15,
-    "node.js": 12,
-    "nodejs": 12,
-    "tailwind": 8,
-    "docker": 8,
-    "supabase": 8,
-    "sql": 8,
-    "git": 6,
-    "rest": 6,
-    "api": 6,
-    "linux": 6,
-    "fullstack": 10,
-    "frontend": 10,
-    "backend": 10,
-    "junior": 10,
-    "trainee": 10,
-}
-
-
-def calculate_match_score(job_data: dict) -> tuple[int, list[str]]:
-    """Laskee työpaikalle yhteensopivuuspisteet (0-100 %) ja palauttaa löydetyt taidot."""
-    text_to_scan = (
-        f"{job_data.get('title', '')} {job_data.get('description', '')}".lower()
-    )
-
-    matched_skills = set()
-    total_score = 0
-
-    for skill, points in SKILL_WEIGHTS.items():
-        if skill in text_to_scan:
-            display_name = (
-                "Next.js"
-                if skill in ["next.js", "nextjs"]
-                else (
-                    "Node.js" if skill in ["node.js", "nodejs"] else skill.capitalize()
-                )
-            )
-            matched_skills.add(display_name)
-            total_score += points
-
-    percentage = min(100, int((total_score / 50) * 100))
-    return percentage, sorted(list(matched_skills))
-
-
-def is_job_matching_location_criteria(job_data: dict) -> tuple[bool, bool]:
-    """Tarkistaa sijainnin. Palauttaa (hyväksytäänkö, onko_paikallinen)."""
-    location = str(job_data.get("location", "")).lower()
-    title = str(job_data.get("title", "")).lower()
-    description = str(job_data.get("description", "")).lower()
-    combined_text = f"{location} {title} {description}"
-
-    for place in POHJOIS_SAVO_MUNICIPALITIES:
-        if place in location or place in title:
-            return True, True
-
-    for remote_term in REMOTE_KEYWORDS:
-        if remote_term in combined_text:
-            return True, False
-
-    return False, False
-
-
-def fetch_duunitori_jobs(query: str):
-    """Hakee työpaikat Duunitorin rajapinnasta ja poimii yrityksen nimen luotettavasti."""
-    url = "https://duunitori.fi/api/v1/jobentries"
-    params = {"search": query, "format": "json"}
-    results = []
-
-    try:
-        res = requests.get(url, params=params, headers=HEADERS, timeout=10)
-        if res.status_code == 200:
-            items = res.json().get("results", [])
-            for item in items[:20]:
-                slug = item.get("slug", "")
-                link = (
-                    f"https://duunitori.fi/tyopaikat/tyo/{slug}"
-                    if slug
-                    else "https://duunitori.fi"
-                )
-
-                # Nappaa yrityksen nimi kaikista Duunitorin mahdollisista kentistä
-                company_obj = item.get("company")
-                company_name = "Ei ilmoitettu"
-
-                if isinstance(company_obj, dict):
-                    company_name = (
-                        company_obj.get("name")
-                        or company_obj.get("title")
-                        or "Ei ilmoitettu"
-                    )
-                elif isinstance(company_obj, str) and company_obj.strip():
-                    company_name = company_obj
-                else:
-                    # Varavaihtoehdot suoraan juuresta
-                    company_name = (
-                        item.get("company_name")
-                        or item.get("employer_name")
-                        or item.get("organization_name")
-                        or "Ei ilmoitettu"
-                    )
-
-                # Poimitaan sijainti
-                location = (
-                    item.get("municipality_name")
-                    or item.get("location_name")
-                    or (
-                        item.get("location")
-                        if isinstance(item.get("location"), str)
-                        else None
-                    )
-                    or "Ei määritelty / Etätyö"
-                )
-
-                results.append(
-                    {
-                        "source": f"Duunitori / {query}",
-                        "title": item.get("heading")
-                        or item.get("title")
-                        or "Työpaikkailmoitus",
-                        "company": company_name,
-                        "location": location,
-                        "description": item.get("descr", "") or item.get("snippet", ""),
-                        "link": link,
-                    }
-                )
-    except Exception as e:
-        print(f"Duunitori-virhe hakusanalla '{query}': {e}")
-    return results
-
-
-def send_push_notification(job: dict, score: int, is_local: bool):
-    """Lähettää push-ilmoituksen puhelimeen Web Push -rajapinnan kautta."""
-    res = supabase.table("push_subscriptions").select("id, subscription").execute()
-    subscriptions = res.data or []
-
-    if not subscriptions:
+def send_push_notification(title, body, url="/"):
+    if not VAPID_PRIVATE_KEY:
+        print("VAPID_PRIVATE_KEY puuttuu, push-ilmoitusta ei lähetetä.")
         return
 
-    location_tag = "📍 Pohjois-Savo" if is_local else "🌐 Etätyö"
-    payload = json.dumps(
-        {
-            "title": f"🎯 Osuma {score}%: {job['title']}",
-            "body": f"🏢 {job['company']} • {location_tag}",
-            "url": job["link"],
-        }
-    )
+    res = supabase.from_("push_subscriptions").select("*").execute()
+    subs = res.data or []
 
-    for item in subscriptions:
+    if not subs:
+        print("Ei aktiivisia push-tilaajia tietokannassa.")
+        return
+
+    payload = json.dumps({"title": title, "body": body, "url": url})
+
+    for item in subs:
+        sub_info = item.get("subscription")
+        sub_id = item.get("id")
+        if not sub_info:
+            continue
+
         try:
             webpush(
-                subscription_info=item["subscription"],
+                subscription_info=sub_info,
                 data=payload,
                 vapid_private_key=VAPID_PRIVATE_KEY,
                 vapid_claims=VAPID_CLAIMS,
             )
-            print(f"-> Push-ilmoitus lähetetty puhelimeen: {job['title']}")
+            print("✅ Push-ilmoitus lähetetty onnistuneesti laitteeseen!")
         except WebPushException as ex:
             print(f"Push-lähetysvirhe: {ex}")
-            # Jos tilaus on vanhentunut tai poistettu selaimesta, siivotaan se pois kannasta
-            if ex.response and ex.response.status_code in [404, 410]:
-                supabase.table("push_subscriptions").delete().eq(
-                    "id", item["id"]
-                ).execute()
+            # Poistetaan vanhentunut tilaus tietokannasta
+            if "410" in str(ex) or "404" in str(ex):
+                if sub_id:
+                    supabase.from_("push_subscriptions").delete().eq(
+                        "id", sub_id
+                    ).execute()
+                    print(f"Poistettu vanhentunut tilaus kannasta (ID: {sub_id})")
 
 
-def run_watchdog():
+def fetch_and_process_jobs():
     print("\n--- Aloitetaan työpaikkahaku ja push-hälytykset ---")
 
-    all_jobs = []
-    seen_in_current_run = set()
-
-    for term in SEARCH_TERMS:
-        duuni_results = fetch_duunitori_jobs(term)
-        for job in duuni_results:
-            if job["link"] not in seen_in_current_run:
-                seen_in_current_run.add(job["link"])
-
-                is_match, is_local = is_job_matching_location_criteria(job)
-                if is_match:
-                    score, skills = calculate_match_score(job)
-                    if is_local or score >= 25:
-                        all_jobs.append((job, score, skills, is_local))
-
-    print(
-        f"Löydettiin {len(all_jobs)} kriteerit täyttävää paikkaa. Tarkistetaan uudet tietokannasta..."
+    # Duunitorin virallinen IT- ja ohjelmistoalan RSS-syöte
+    feed_url = (
+        "https://duunitori.fi/tyopaikat/ammattiala/it-ohjelmistot-tietoliikenne/rss.xml"
     )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+    try:
+        resp = requests.get(feed_url, headers=headers, timeout=10)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"Virhe haettaessa Duunitorin syötettä: {e}")
+        return
 
-    new_count = 0
-    for job, score, skills, is_local in all_jobs:
-        job_link = job["link"]
+    # Etsitään ilmoitukset regexillä
+    items = re.findall(r"<item>(.*?)</item>", resp.text, re.DOTALL)
 
-        existing = (
-            supabase.table("seen_jobs").select("id").eq("job_url", job_link).execute()
+    new_jobs = []
+    for item in items:
+        title_match = re.search(r"<title>(.*?)</title>", item)
+        link_match = re.search(r"<link>(.*?)</link>", item)
+        desc_match = re.search(r"<description>(.*?)</description>", item)
+
+        raw_title = title_match.group(1) if title_match else "Työpaikkailmoitus"
+        job_url = link_match.group(1) if link_match else ""
+        desc = desc_match.group(1) if desc_match else ""
+
+        # Siistitään CDATA
+        raw_title = raw_title.replace("<![CDATA[", "").replace("]]>", "").strip()
+        desc = desc.replace("<![CDATA[", "").replace("]]>", "").strip()
+
+        # Erotetaan yritys ja titteli ("Titteli - Yritys" -> erikseen)
+        if " - " in raw_title:
+            parts = raw_title.split(" - ")
+            title = parts[0].strip()
+            company = parts[1].strip()
+        else:
+            title = raw_title
+            company = "Yritys ei tiedossa"
+
+        # Tunnistetaan sijainti tekstistä
+        location = "Suomi / Etä"
+        text_content = f"{title} {desc}".lower()
+        if (
+            "kuopio" in text_content
+            or "pohjois-savo" in text_content
+            or "siilinjärvi" in text_content
+        ):
+            location = "Pohjois-Savo / Kuopio"
+        elif "etä" in text_content or "remote" in text_content:
+            location = "Etätyö / Remote"
+
+        # Pisteytys
+        score = 0
+        matched_skills = []
+        keywords = {
+            "React": ["react", "next.js", "nextjs"],
+            "TypeScript": ["typescript", "ts"],
+            "Node.js": ["node", "nodejs", "express"],
+            "Python": ["python", "django", "fastapi"],
+            "Fullstack": ["fullstack", "full stack", "web"],
+        }
+
+        for skill, terms in keywords.items():
+            if any(t in text_content for t in terms):
+                score += 20
+                matched_skills.append(skill)
+
+        if score > 100:
+            score = 100
+
+        # Tarkistetaan onko työpaikka jo kannassa
+        exists = (
+            supabase.from_("seen_jobs").select("id").eq("job_url", job_url).execute()
         )
-
-        if existing.data:
-            continue
-
-        # 1. Lähetetään Push-ilmoitus suoraan puhelimeen
-        send_push_notification(job, score, is_local)
-        new_count += 1
-
-        # 2. Tallennetaan työpaikka Supabaseen (näkyy heti puhelimen etusivulla)
-        supabase.table("seen_jobs").insert(
-            {
-                "job_url": job_link,
-                "webhook_url": "push",
-                "title": job["title"],
-                "company": job["company"],
-                "location": job["location"],
+        if not exists.data:
+            job_data = {
+                "title": title,
+                "company": company,
+                "location": location,
+                "job_url": job_url,
                 "match_score": score,
-                "matched_skills": skills,
+                "matched_skills": matched_skills,
             }
-        ).execute()
+            res = supabase.from_("seen_jobs").insert(job_data).execute()
+            if res.data:
+                new_jobs.append(job_data)
 
-    print(f"Haku valmis. Uusia ilmoituksia löydetty ja viety kantaan: {new_count}")
+    print(f"Haku valmis. Uusia ilmoituksia löydetty ja viety kantaan: {len(new_jobs)}")
+
+    # Lähetetään YKSI koottu ilmoitus
+    if len(new_jobs) == 1:
+        j = new_jobs[0]
+        send_push_notification(
+            title=f"🎯 Uusi työpaikka: {j['title']}",
+            body=f"🏢 {j['company']} ({j['location']}) • Osuvuus: {j['match_score']}%",
+            url=j["job_url"],
+        )
+    elif len(new_jobs) > 1:
+        best_match = max(new_jobs, key=lambda x: x.get("match_score", 0))
+        send_push_notification(
+            title=f"🎯 Löytyi {len(new_jobs)} uutta työpaikkaa!",
+            body=f"Paras osuma: {best_match['title']} ({best_match['match_score']}%) - {best_match['company']}",
+            url="/",
+        )
 
 
 if __name__ == "__main__":
-    run_watchdog()
+    fetch_and_process_jobs()
